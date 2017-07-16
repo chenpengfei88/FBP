@@ -1,0 +1,523 @@
+import com.android.SdkConstants
+import com.android.build.api.transform.Context
+import com.android.build.api.transform.Format
+import com.android.build.api.transform.QualifiedContent
+import com.android.build.api.transform.Transform
+import com.android.build.api.transform.TransformException
+import com.android.build.api.transform.TransformInput
+import com.android.build.api.transform.TransformOutputProvider
+import com.android.build.gradle.AppExtension
+import com.android.build.gradle.internal.pipeline.TransformManager
+import org.apache.commons.codec.digest.DigestUtils
+import org.apache.commons.io.FileUtils
+import org.objectweb.asm.ClassReader
+import org.objectweb.asm.ClassVisitor
+import org.objectweb.asm.ClassWriter
+import org.objectweb.asm.MethodVisitor
+import org.objectweb.asm.Opcodes
+
+import java.util.jar.JarOutputStream
+import java.util.regex.Matcher
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
+
+apply plugin: 'com.android.application'
+//apply plugin: FBPTransform
+
+
+android {
+    compileSdkVersion 25
+    buildToolsVersion "25.0.1"
+
+    defaultConfig {
+        applicationId "me.cpf.fbp"
+        minSdkVersion 14
+        targetSdkVersion 25
+        versionCode 1
+        versionName "1.0"
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+}
+
+dependencies {
+    compile fileTree(dir: 'libs', include: ['*.jar'])
+    testCompile 'junit:junit:4.12'
+    compile 'com.android.support:appcompat-v7:25.3.1'
+
+    compile 'org.ow2.asm:asm:5.0.3'
+    compile 'org.ow2.asm:asm-commons:5.0.3'
+}
+
+apply plugin: 'fdot'
+class FBPTransform extends Transform implements Plugin<Project> {
+
+    def android
+    def fbp
+
+    static Logger logger
+
+    private Map<String, List<String>> methodMap = new HashMap<>()
+
+    List<FBPClass> dotClassList = new ArrayList<>();
+
+    List<FBPAPIMthod> apiMethodList = new ArrayList<>();
+
+    List<FBPAPIParams> apiParamsList = new ArrayList<>();
+
+
+    String fbpXml = "fbp.xml"
+
+    public List RFileClassList = new ArrayList<>()
+
+
+    @Override
+    void apply(Project target) {
+        fbp = new XmlSlurper().parse(new File("${target.projectDir}/${fbpXml}"))
+
+        RFileClassList.add("R\$array");
+        RFileClassList.add("R\$xml");
+        RFileClassList.add("R\$styleable");
+        RFileClassList.add("R\$style");
+        RFileClassList.add("R\$string");
+        RFileClassList.add("R\$raw");
+        RFileClassList.add("R\$menu");
+        RFileClassList.add("R\$layout");
+        RFileClassList.add("R\$integer");
+        RFileClassList.add("R\$id");
+        RFileClassList.add("R\$drawable");
+        RFileClassList.add("R\$dimen");
+        RFileClassList.add("R\$color");
+        RFileClassList.add("R\$bool");
+        RFileClassList.add("R\$mipmap");
+        RFileClassList.add("BuildConfig");
+        RFileClassList.add("R\$attr");
+        RFileClassList.add("R\$anim");
+        RFileClassList.add("R");
+
+        logger = target.logger
+
+
+        fbp.apimethod.each {
+            def apimethodName = it.name;
+            logger.quiet '=============apimethodName================' +apimethodName;
+            FBPAPIMthod fbpapiMthod = new FBPAPIMthod();
+            fbpapiMthod.methodName = apimethodName;
+
+            it.pro.name.each {
+                def apiParam = it;
+                def index = apiParam.text().indexOf("||");
+
+                FBPAPIParams fp = new FBPAPIParams();
+                fp.paramstype = apiParam.text().substring(0,index);
+                fp.type = apiParam.text().substring(index + 2);
+
+                apiParamsList.add(fp);
+            }
+
+            fbpapiMthod.params = apiParamsList;
+            apiMethodList.add(fbpapiMthod)
+        }
+
+        fbp.classname.each {
+            def dotClassName = it.name.n;
+
+
+            List<FBPMethod> dotMethodList = new ArrayList<>();
+           it.method.name.each {
+               def dotMethod = it;
+               def dotMethodName = dotMethod.text().substring(0, dotMethod.text().indexOf("("));
+
+               FBPMethod fbpMethod = new FBPMethod();
+               fbpMethod.methodName = dotMethodName;
+
+               def fieldName = dotMethod.text().substring(dotMethod.text().indexOf("(") + 1, dotMethod.text().indexOf(")"));
+
+               def fieldNameArray = fieldName.split(",");
+
+               List<FBPParams> dotParList = new ArrayList<>();
+               for (int i = 0; i < fieldNameArray.length; i++) {
+                  // logger.quiet '=============pro================' + fieldNameArray[i];
+                   FBPParams params = new FBPParams();
+                   params.paramsValue = fieldNameArray[i];
+
+                   dotParList.add(params);
+               }
+
+               fbpMethod.pList = dotParList;
+
+               dotMethodList.add(fbpMethod);
+
+               //logger.quiet '=============dotMethodList================' + fbpMethod.methodName + "====" + fieldName;
+           }
+
+            FBPClass fbpClass = new FBPClass();
+            fbpClass.className = dotClassName;
+            fbpClass.methodList = dotMethodList;
+
+            dotClassList.add(fbpClass);
+
+            //logger.quiet '=============fbpClass================' + fbpClass.className;
+        }
+
+        android = target.extensions.getByType(AppExtension)
+        android.registerTransform(this)
+
+
+        for (int m = 0; m < dotClassList.size(); m++) {
+            // logger.quiet '=============pro================' + fieldNameArray[i];
+            FBPClass fbpClass = dotClassList.get(m);
+           // logger.quiet '=============fbpClassName================' + fbpClass.className;
+
+            List<FBPMethod> methodList = fbpClass.methodList;
+
+            for (int n = 0; n < methodList.size(); n++) {
+                FBPMethod method = methodList.get(n);
+                //logger.quiet '=================fbpMethodName================' + method.methodName;
+
+               List<FBPParams> paramses = method.pList;
+
+                for (int t = 0; t < paramses.size(); t++) {
+                  //  logger.quiet '===================fbpProName================' + paramses.get(t).paramsValue;
+                }
+            }
+
+        }
+
+
+//        for (int m = 0; m < apiMethodList.size(); m++) {
+//            FBPAPIMthod fbpapiMthod = apiMethodList.get(m);
+//             logger.quiet '=============API Method================' + fbpapiMthod.methodName;
+//            List<FBPAPIParams> paramsList = fbpapiMthod.params;
+//
+//            for (int n = 0; n < paramsList.size(); n++) {
+//                FBPAPIParams ppp = paramsList.get(n);
+//                logger.quiet '===================API Params================' + ppp.type + "=====" + ppp.paramstype;
+//            }
+//        }
+
+    }
+
+    public FBPClass isDot(String className) {
+        FBPClass fclassName = null;
+        for (int m = 0; m < dotClassList.size(); m++) {
+            FBPClass fbpClass = dotClassList.get(m);
+            if (fbpClass.className.equals(className)) {
+              //  logger.quiet '==================isDot================' + className
+                fclassName = fbpClass;
+                break;
+            }
+        }
+        return fclassName;
+    }
+
+
+
+    @Override
+    String getName() {
+        return "Fbp"
+    }
+
+    @Override
+    Set<QualifiedContent.ContentType> getInputTypes() {
+        return TransformManager.CONTENT_CLASS
+    }
+
+    @Override
+    Set<QualifiedContent.Scope> getScopes() {
+        return TransformManager.SCOPE_FULL_PROJECT
+    }
+
+    @Override
+    boolean isIncremental() {
+        return false
+    }
+
+    protected void zipFile(byte[] classBytesArray, ZipOutputStream zos, String entryName){
+        try {
+            ZipEntry entry = new ZipEntry(entryName);
+            zos.putNextEntry(entry);
+            zos.write(classBytesArray, 0, classBytesArray.length);
+            zos.closeEntry();
+            zos.flush();
+        }catch (Exception e){
+            e.printStackTrace();
+        }
+    }
+
+    void transform(Context context, Collection<TransformInput> inputs, Collection<TransformInput> referencedInputs, TransformOutputProvider outputProvider, boolean isIncremental) throws IOException, TransformException, InterruptedException {
+
+        def fileOut = outputProvider.getContentLocation("cpf", getOutputTypes(), getScopes(),
+                Format.JAR);
+        if(!fileOut.getParentFile().exists()){
+            fileOut.getParentFile().mkdirs();
+        }
+        if(fileOut.exists()){
+            fileOut.delete();
+        }
+        ZipOutputStream outStream = new JarOutputStream(new FileOutputStream(fileOut));
+        inputs.each {
+            //logger.quiet '=============directoryInputs================' + it.directoryInputs
+            it.directoryInputs.each {
+                def dirPath = it.file.absolutePath
+               // logger.quiet '=============dirPath================' + dirPath
+                org.apache.commons.io.FileUtils.listFiles(it.file, null, true).each {
+                   // logger.quiet '=============absolutePath================' + it.absolutePath
+                    if (it.absolutePath.endsWith(SdkConstants.DOT_CLASS)) {
+                        def packageClassName = it.absolutePath.substring(dirPath.length() + 1, it.absolutePath.length() -
+                                SdkConstants.DOT_CLASS.length()).replaceAll(Matcher.quoteReplacement(File.separator), '.')
+
+                        def className = packageClassName.substring(packageClassName.lastIndexOf(".") + 1)
+
+                        def  y = it.absolutePath.substring(dirPath.length() + 1, it.absolutePath.length())
+
+                        logger.quiet '=============className===============' +packageClassName + "==" + className + "==" + y
+                        FBPClass dotClass = isDot(packageClassName);
+                        if (!RFileClassList.contains(className) && dotClass != null) {
+
+                            ClassReader cr = new ClassReader(it.bytes);
+                            ClassWriter cw = new ClassWriter(cr, ClassWriter.COMPUTE_MAXS);
+                            ClassVisitor cv = new FBPClassVisitor(Opcodes.ASM5, cw, dotClass, apiMethodList);
+
+                            cr.accept(cv, Opcodes.ASM5);
+
+                            byte[] code = cw.toByteArray();
+
+                            zipFile(code, outStream, y)
+
+//                            FileOutputStream fos = new FileOutputStream(
+//                                    fileOut);
+//                            fos.write(code);
+//                            fos.close();
+                            //logger.quiet '=============className=====guo==========='+  packageClassName
+                        } else {
+                            zipFile(it.bytes, outStream, y)
+//                            logger.quiet '=============className=====guo===========' +packageClassName
+                        }
+                    }
+                }
+
+//                def dest = outputProvider.getContentLocation(it.name,
+//                        it.contentTypes, it.scopes,
+//                        Format.DIRECTORY)
+//                FileUtils.copyDirectory(it.file, dest)
+            }
+
+
+            it.jarInputs.each {
+                def jarName = it.name
+
+                def dest = outputProvider.getContentLocation(jarName,
+                        it.contentTypes, it.scopes, Format.JAR)
+//                logger.quiet '=============jarInputs==============='+it.file.getAbsolutePath()
+//                logger.quiet '=============dest==============='+ dest
+                FileUtils.copyFile(it.file, dest)
+            }
+        }
+        outStream.close();
+    }
+}
+
+public class FBPClassVisitor extends ClassVisitor {
+
+   private FBPClass fbpClass;
+    private List<FBPMethod> methodList;
+
+    List<FBPAPIMthod> fbpapiMthodList;
+
+    public FBPMethod isDotMethod(List<FBPMethod> methodList, String methodName) {
+        FBPMethod fmethodName = null;
+        for (int m = 0; m < methodList.size(); m++) {
+            FBPMethod method = methodList.get(m);
+            if (method.methodName.equals(methodName)) {
+                //System.out.println('==================isDot=Method===============' + method.methodName + "====" + methodName)
+                fmethodName = method;
+                break;
+            }
+        }
+        return fmethodName;
+    }
+
+    public FBPClassVisitor(int api) {
+        super(api);
+    }
+
+    public FBPClassVisitor(int api, ClassVisitor cv, FBPClass fbpClass, List<FBPAPIMthod> fbpapiMthodList) {
+        super(api, cv);
+
+
+        this.fbpClass = fbpClass;
+        methodList = fbpClass.methodList;
+        this.fbpapiMthodList = fbpapiMthodList;
+
+//        methodNameList = new ArrayList<>();
+//        fieldNameList = new ArrayList<>();
+//
+//        for (String mf : methodFieldList) {
+//            String methodName = mf.substring(0, mf.indexOf("("));
+//            if (mf.contains("()")) {
+//                fieldNameList.add("");
+//            } else {
+//                String fieldName = mf.substring(mf.indexOf("(") + 1, mf.indexOf(")"));
+//                fieldNameList.add(fieldName);
+//            }
+//         //   logger.quiet '=============methodName================' + methodName + "==" + fieldName
+//            methodNameList.add(methodName);
+//        }
+    }
+
+    @Override
+    public void visit(int version, int access, String name, String signature, String superName, String[] interfaces) {
+        if (cv != null) {
+            cv.visit(version, access, name, signature, superName, interfaces);
+        }
+    }
+
+    @Override
+    public MethodVisitor visitMethod(int access, String name, String desc, String signature, String[] exceptions) {
+        FBPMethod fbpMethod = isDotMethod(methodList, name);
+        if (fbpMethod != null) {
+            MethodVisitor mv = cv.visitMethod(access, name, desc, signature, exceptions);
+            return new FBPMethodVisitor(Opcodes.ASM5, mv, fbpMethod.pList, fbpapiMthodList);
+        }
+        return super.visitMethod(access, name, desc, signature, exceptions);
+    }
+}
+
+public class FBPMethodVisitor extends MethodVisitor implements Opcodes {
+
+   List<FBPParams> fbpParamsList = null;
+
+    List<FBPAPIMthod> fbpapiMthodList;
+
+    public FBPMethodVisitor(int api) {
+        super(api);
+    }
+
+    public FBPMethodVisitor(int api, MethodVisitor mv, List<FBPParams> fbpParamsList, List<FBPAPIMthod> fbpapiMthodList) {
+        super(api, mv);
+
+        this.fbpParamsList = fbpParamsList;
+        this.fbpapiMthodList = fbpapiMthodList;
+
+        for (FBPParams p : fbpParamsList) {
+           // System.out.println("==================paramsValue================" + p.paramsValue);
+        }
+
+        for (FBPAPIMthod fbpapiMthod : fbpapiMthodList) {
+            //System.out.println("==================fbpapiMthod================" + fbpapiMthod.methodName);
+        }
+    }
+
+    @Override
+    public void visitCode() {
+//        mv.visitCode();
+//        mv.visitVarInsn(ALOAD, 0);
+//        mv.visitFieldInsn(GETFIELD, "me/cpf/fbp/Person", "activity", "Landroid/app/Activity;");
+//
+////        if (fileds != null && !fileds.equals("")) {
+////            String[] fieldArray = fileds.split(",");
+////            for(String fd : fieldArray) {
+////                mv.visitLdcInsn(fd);
+////            }
+////        }
+//
+//        mv.visitLdcInsn("1");
+//        mv.visitLdcInsn("1");
+//
+//        mv.visitMethodInsn(INVOKESTATIC, "me/cpf/fbp/Test", "da", "(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;)V", false);
+//        mv.visitMaxs(3,1);
+//        mv.visitEnd();
+        super.visitCode();
+
+        String apiMethonAME = ""
+
+        String methodParasmtype = "";
+
+        for (int p = 0; p < fbpParamsList.size(); p++) {
+         //   System.out.println("==================paramsValue================" + p.paramsValue);
+
+            FBPAPIMthod fbpapiMthod = fbpapiMthodList.get(0);
+            apiMethonAME = fbpapiMthod.methodName;
+            //api方法名
+            String apiMethodName = fbpapiMthod.methodName;
+            List<FBPAPIParams> fbpapiParamsList = fbpapiMthod.params;
+
+            FBPParams params = fbpParamsList.get(p);
+            FBPAPIParams fbpapiParams = fbpapiParamsList.get(p);
+
+            if (fbpapiParams.type.equals("field")) {
+                mv.visitVarInsn(ALOAD, 0);
+                mv.visitFieldInsn(GETFIELD, "me/cpf/fbp/Person", params.paramsValue, "L" + fbpapiParams.paramstype + ";");
+            }
+
+            if (fbpapiParams.type.equals("constant")) {
+                mv.visitLdcInsn(params.paramsValue);
+            }
+
+            methodParasmtype = methodParasmtype + "L" + fbpapiParams.paramstype + ";"
+        }
+
+        int index = apiMethonAME.lastIndexOf("/");
+        String methodPackageName = apiMethonAME.substring(0, index);
+        String metName = apiMethonAME.substring(index + 1);
+        //System.out.println("=========allalala=========" + methodPackageName + "====" +metName);
+        methodParasmtype =  "(" + methodParasmtype + ")V";
+        mv.visitMethodInsn(INVOKESTATIC, methodPackageName, metName, methodParasmtype, false);
+
+//                mv.visitVarInsn(ALOAD, 0);
+//                mv.visitFieldInsn(GETFIELD, "me/cpf/fbp/Person", "activity", "Landroid/app/Activity;");
+//                mv.visitLdcInsn("1");
+//                mv.visitLdcInsn("22");
+//                mv.visitMethodInsn(INVOKESTATIC, "me/cpf/fbp/Test", "da", "(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;)V", false);
+
+                mv.visitEnd();
+
+    }
+
+    @Override
+    public void visitInsn(int opcode) {
+        super.visitInsn(opcode);
+    }
+
+}
+
+public class FBPClass {
+
+    public String className;
+
+    public List<FBPMethod> methodList;
+}
+
+public class FBPMethod {
+
+    public String methodName;
+
+    public List<FBPParams> pList;
+}
+
+public class FBPParams {
+
+    public String paramsValue;
+
+}
+
+public class FBPAPIMthod {
+
+    public String methodName;
+
+    public List<FBPAPIParams> params;
+
+}
+
+public class FBPAPIParams {
+
+    public String paramstype;
+
+    public String type;
+
+}

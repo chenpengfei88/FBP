@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <switch>
+        <turnOnFdot>true</turnOnFdot>
+    </switch>
+
+    <apimethod>
+        <name>me.cpf.fbp.Test.da</name>
+        <param>
+            <name>android.app.Activity||field</name>
+            <name>java.lang.String||constant</name>
+            <name>java.lang.String||constant</name>
+        </param>
+    </apimethod>
+
+    <classname>
+       <name>me.cpf.fbp.Person</name>
+        <method>
+            <name>getName(activity, cpf, ljm)||0</name>
+        </method>
+    </classname>
+
+    <!--
+    <classname>
+        <name>me.cpf.fbp.Student</name>
+        <method>
+            <name>getBanJi(2,3)</name>
+        </method>
+    </classname>-->
+
+</resources>
